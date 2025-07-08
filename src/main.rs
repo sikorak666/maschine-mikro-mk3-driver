@@ -1,8 +1,3 @@
-extern crate hidapi;
-extern crate num;
-#[macro_use]
-extern crate num_derive;
-extern crate alsa;
 mod controls;
 mod font;
 mod lights;
@@ -11,10 +6,199 @@ use crate::controls::{Buttons, PadEventType};
 use crate::font::Font;
 use crate::lights::{Brightness, Lights, PadColors};
 use crate::screen::Screen;
-use alsa::seq;
 use hidapi::{HidDevice, HidResult};
-use std::ffi::CString;
+use midly::{live::LiveEvent, MidiMessage};
 use std::{thread, time};
+use midir::MidiOutput;
+use midir::os::unix::VirtualOutput;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::env;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct PadBrightness {
+    #[serde(default = "default_brightness_off")]
+    note_off: String,
+    #[serde(default = "default_brightness_on")]
+    note_on: String,
+}
+
+impl Default for PadBrightness {
+    fn default() -> Self {
+        PadBrightness {
+            note_off: default_brightness_off(),
+            note_on: default_brightness_on(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Config {
+    #[serde(default = "default_velocity_sensitivity")]
+    velocity_sensitivity: f32,
+    #[serde(default = "default_note_maps")]
+    note_maps: [u8; 16],
+    #[serde(default)]
+    pad_brightness: PadBrightness,
+    #[serde(default = "default_pad_colors")]
+    pad_colors: [String; 16],
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            velocity_sensitivity: default_velocity_sensitivity(),
+            note_maps: default_note_maps(),
+            pad_brightness: PadBrightness::default(),
+            pad_colors: default_pad_colors(),
+        }
+    }
+}
+
+fn default_note_maps() -> [u8; 16] {
+    [49, 27, 31, 57, 48, 47, 43, 59, 36, 38, 46, 51, 36, 38, 42, 44]
+}
+
+fn default_velocity_sensitivity() -> f32 {
+    1.0
+}
+
+fn default_brightness_off() -> String {
+    "off".to_string()
+}
+
+fn default_brightness_on() -> String {
+    "normal".to_string()
+}
+
+fn default_pad_colors() -> [String; 16] {
+    [
+        "white".to_string(), "white".to_string(), "white".to_string(), "white".to_string(),
+        "white".to_string(), "white".to_string(), "white".to_string(), "white".to_string(),
+        "white".to_string(), "white".to_string(), "white".to_string(), "white".to_string(),
+        "white".to_string(), "white".to_string(), "white".to_string(), "white".to_string(),
+    ]
+}
+
+fn string_to_brightness(s: &str) -> Brightness {
+    match s.to_lowercase().as_str() {
+        "off" => Brightness::Off,
+        "dim" => Brightness::Dim,
+        "normal" => Brightness::Normal,
+        "bright" => Brightness::Bright,
+        _ => Brightness::Normal,
+    }
+}
+
+fn string_to_pad_color(s: &str) -> PadColors {
+    match s.to_lowercase().as_str() {
+        "off" => PadColors::Off,
+        "red" => PadColors::Red,
+        "orange" => PadColors::Orange,
+        "lightorange" => PadColors::LightOrange,
+        "warmyellow" => PadColors::WarmYellow,
+        "yellow" => PadColors::Yellow,
+        "lime" => PadColors::Lime,
+        "green" => PadColors::Green,
+        "mint" => PadColors::Mint,
+        "cyan" => PadColors::Cyan,
+        "turquoise" => PadColors::Turquoise,
+        "blue" => PadColors::Blue,
+        "plum" => PadColors::Plum,
+        "violet" => PadColors::Violet,
+        "purple" => PadColors::Purple,
+        "magenta" => PadColors::Magenta,
+        "fuchsia" => PadColors::Fuchsia,
+        "white" => PadColors::White,
+        _ => PadColors::White,
+    }
+}
+
+fn get_config_path() -> PathBuf {
+    // Opcja 1: Sprawdź zmienną środowiskową
+    if let Ok(custom_path) = env::var("MASCHINE_CONFIG_PATH") {
+        return PathBuf::from(custom_path);
+    }
+
+    // Opcja 2: Katalog z plikiem wykonywalnym
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let config_in_exe_dir = exe_dir.join("maschine_config.json");
+            // Jeśli plik już istnieje tam, używaj go
+            if config_in_exe_dir.exists() {
+                return config_in_exe_dir;
+            }
+            // Jeśli mamy uprawnienia do zapisu, używaj tego katalogu
+            if exe_dir.metadata().map(|m| !m.permissions().readonly()).unwrap_or(false) {
+                return config_in_exe_dir;
+            }
+        }
+    }
+
+    // Opcja 3: Katalog ~/.config/maschine-mikro-mk3/
+    if let Some(home_dir) = dirs::home_dir() {
+        let config_dir = home_dir.join(".config").join("maschine-mikro-mk3");
+        // Utwórz katalog jeśli nie istnieje
+        let _ = fs::create_dir_all(&config_dir);
+        return config_dir.join("maschine_config.json");
+    }
+
+    // Opcja 4: Bieżący katalog (fallback)
+    PathBuf::from("maschine_config.json")
+}
+
+fn load_config() -> Config {
+    let config_path = get_config_path();
+    println!("Szukam pliku konfiguracji: {}", config_path.display());
+
+    if config_path.exists() {
+        match fs::read_to_string(&config_path) {
+            Ok(config_str) => {
+                match serde_json::from_str(&config_str) {
+                    Ok(config) => {
+                        println!("Załadowano konfigurację z: {}", config_path.display());
+                        config
+                    }
+                    Err(e) => {
+                        eprintln!("Błąd parsowania pliku konfiguracji: {}", e);
+                        eprintln!("Używam domyślnej konfiguracji");
+                        Config::default()
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Błąd odczytu pliku konfiguracji: {}", e);
+                eprintln!("Używam domyślnej konfiguracji");
+                Config::default()
+            }
+        }
+    } else {
+        println!("Plik konfiguracji nie istnieje.");
+        println!("Tworzę domyślny plik konfiguracji...");
+
+        let default_config = Config::default();
+        match serde_json::to_string_pretty(&default_config) {
+            Ok(json) => {
+                // Upewnij się, że katalog istnieje
+                if let Some(parent) = config_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+
+                if let Err(e) = fs::write(&config_path, json) {
+                    eprintln!("Nie udało się utworzyć pliku konfiguracji: {}", e);
+                } else {
+                    println!("Utworzono domyślny plik konfiguracji: {}", config_path.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("Błąd serializacji konfiguracji: {}", e);
+            }
+        }
+
+        default_config
+    }
+}
 
 fn self_test(device: &HidDevice, screen: &mut Screen, lights: &mut Lights) -> HidResult<()> {
     Font::write_digit(screen, 0, 0, 1, 4);
@@ -70,30 +254,22 @@ fn self_test(device: &HidDevice, screen: &mut Screen, lights: &mut Lights) -> Hi
 }
 
 fn main() -> HidResult<()> {
-    // let s = alsa::Seq::open(None, Some(alsa::Direction::Capture), true).unwrap();
-    // let cstr = CString::new("rust_synth_example").unwrap();
-    // s.set_client_name(&cstr).unwrap();
+    // Ładowanie konfiguracji z pliku
+    let config = load_config();
+    let notemaps = config.note_maps;
+    let velocity_sensitivity = config.velocity_sensitivity;
+    let brightness_off = string_to_brightness(&config.pad_brightness.note_off);
+    let brightness_on = string_to_brightness(&config.pad_brightness.note_on);
+    let pad_colors: Vec<PadColors> = config.pad_colors.iter()
+    .map(|c| string_to_pad_color(c))
+    .collect();
 
-    // // Create a destination port we can read from
-    // let mut dinfo = seq::PortInfo::empty().unwrap();
-    // dinfo.set_capability(seq::PortCap::WRITE | seq::PortCap::SUBS_WRITE);
-    // dinfo.set_type(seq::PortType::MIDI_GENERIC | seq::PortType::APPLICATION);
-    // dinfo.set_name(&cstr);
-    // s.create_port(&dinfo).unwrap();
-    // let dport = dinfo.get_port();
+    println!("Używam mapowania MIDI: {:?}", notemaps);
+    println!("Czułość velocity: {}", velocity_sensitivity);
+    println!("Jasność padów: {} -> {}", config.pad_brightness.note_off, config.pad_brightness.note_on);
 
-    // let sq: alsa::Seq = alsa::Seq::open(Some(&CString::new("Maschine Mikro Mk3").unwrap()), Some(alsa::Direction::Playback), true).unwrap();
-    let sequencer = alsa::Seq::open(None, Some(alsa::Direction::Playback), true).unwrap();
-    sequencer
-        .set_client_name(&CString::new("open-maschine").unwrap())
-        .unwrap();
-
-    let mut port_info = seq::PortInfo::empty().unwrap();
-    port_info.set_name(&CString::new("Maschine Mikro Mk3 MIDI").unwrap());
-    port_info.set_capability(seq::PortCap::READ | seq::PortCap::SUBS_READ);
-    port_info.set_type(seq::PortType::MIDI_GENERIC);
-    sequencer.create_port(&port_info).unwrap();
-    let seq_port = port_info.get_port();
+    let output = MidiOutput::new("Maschine Mikro MK3").expect("Couldn't open MIDI output");
+    let mut port = output.create_virtual("Maschine Mikro MK3 MIDI Out").expect("Couldn't create virtual port");
 
     let api = hidapi::HidApi::new()?;
     #[allow(non_snake_case)]
@@ -106,6 +282,12 @@ fn main() -> HidResult<()> {
     let mut lights = Lights::new();
 
     self_test(&device, &mut screen, &mut lights)?;
+
+    // Inicjalizacja padów z konfiguracji
+    for i in 0..16 {
+        lights.set_pad(i, pad_colors[i], brightness_off);
+    }
+    lights.write(&device)?;
 
     let mut buf = [0u8; 64];
     loop {
@@ -140,7 +322,7 @@ fn main() -> HidResult<()> {
                                 if status {
                                     Brightness::Normal
                                 } else {
-                                    Brightness::Off
+                                    Brightness::Dim
                                 },
                             );
                             changed_lights = true;
@@ -173,60 +355,61 @@ fn main() -> HidResult<()> {
                 if i > 1 && idx == 0 && evt as u8 == 0 && val == 0 {
                     break;
                 }
-                let evt: PadEventType = num::FromPrimitive::from_u8(evt).unwrap();
+                let pad_evt: PadEventType = num::FromPrimitive::from_u8(evt).unwrap();
                 // if evt != PadEventType::Aftertouch {
-                println!("Pad {}: {:?} @ {}", idx, evt, val);
+                println!("Pad {}: {:?} @ {}", idx, pad_evt, val);
                 // }
                 let (_, prev_b) = lights.get_pad(idx as usize);
-                let b = match evt {
-                    PadEventType::NoteOn | PadEventType::PressOn => Brightness::Normal,
-                    PadEventType::NoteOff | PadEventType::PressOff => Brightness::Off,
+                let b = match pad_evt {
+                    PadEventType::NoteOn | PadEventType::PressOn => brightness_on,
+                    PadEventType::NoteOff | PadEventType::PressOff => brightness_off,
                     PadEventType::Aftertouch => {
                         if val > 0 {
-                            Brightness::Normal
+                            brightness_on
                         } else {
-                            Brightness::Off
+                            brightness_off
                         }
                     }
                     #[allow(unreachable_patterns)]
                     _ => prev_b,
                 };
                 if prev_b != b {
-                    lights.set_pad(idx as usize, PadColors::Blue, b);
+                    lights.set_pad(idx as usize, pad_colors[idx as usize], b);
                     changed_lights = true;
                 }
                 // let padids = [13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4];
                 // let note = padids[idx as usize]-1+36;
-                let notemaps = [
-                    49, 27, 31, 57, 48, 47, 43, 59, 36, 38, 46, 51, 36, 38, 42, 44,
-                ];
+
                 let note = notemaps[idx as usize];
-                let mut velocity = (val >> 5) as u8;
-                if val > 0 && velocity == 0 {
-                    velocity = 1;
-                }
-                let ev_note = seq::EvNote {
-                    channel: 0,
-                    note: note,
-                    duration: 0,
-                    velocity: velocity,
-                    off_velocity: velocity,
+
+                // Skalowanie velocity z konfiguracją czułości
+                let raw_velocity = (val as f32 * velocity_sensitivity / 32.0).min(127.0) as u8;
+                let velocity = if raw_velocity > 0 && val > 0 {
+                    raw_velocity.max(1)
+                } else {
+                    0
                 };
 
-                let evt_type = match evt {
-                    PadEventType::NoteOn | PadEventType::PressOn => seq::EventType::Noteon,
-                    PadEventType::NoteOff | PadEventType::PressOff => seq::EventType::Noteoff,
-                    PadEventType::Aftertouch => seq::EventType::Keypress,
+                let event = match pad_evt {
+                    PadEventType::NoteOn | PadEventType::PressOn => Some(MidiMessage::NoteOn {
+                        key: note.into(),
+                                                                         vel: velocity.into(),
+                    }),
+                    PadEventType::NoteOff | PadEventType::PressOff => Some(MidiMessage::NoteOff {
+                        key: note.into(),
+                                                                           vel: velocity.into(),
+                    }),
+                    _ => {None}
                 };
 
-                if evt_type != seq::EventType::Keypress {
-                    let mut event = seq::Event::new(evt_type, &ev_note);
-                    println!("emitting {:?} vel {}", evt_type, velocity);
-                    event.set_subs();
-                    event.set_direct();
-                    event.set_source(seq_port);
-                    sequencer.event_output(&mut event).unwrap();
-                    sequencer.drain_output().unwrap();
+                if let Some(evt) = event {
+                    let l_ev = LiveEvent::Midi {
+                        channel: 0.into(),
+                        message: evt,
+                    };
+                    let mut buf = Vec::new();
+                    l_ev.write(&mut buf).unwrap();
+                    port.send(&buf[..]).unwrap()
                 }
             }
         }
