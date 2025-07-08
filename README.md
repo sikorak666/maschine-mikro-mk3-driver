@@ -1,39 +1,83 @@
-# Maschine Mikro MK3 Linux Driver
+# Maschine Mikro MK3 MIDI Linux Driver (work in progress)
 Native Instruments Maschine Mikro MK3 userspace MIDI driver for Linux.
 
-Inspired by [maschine.rs](https://github.com/wrl/maschine.rs).
+This project is a fork of the original [`maschine-mikro-mk3-driver`](https://github.com/r00tman/maschine-mikro-mk3-driver.git) by **r00tman**.  
+**Many thanks to r00tman** for their foundational work — without it, this continuation would not have been possible.
 
-## Getting Started
+This Rust-based project provides a **custom driver** for the **Native Instruments Maschine Mikro MK3** controller.  
+Its primary goal is to enable **advanced configuration** far beyond the default capabilities.
 
-```shell
-$ git clone https://github.com/r00tman/maschine-mikro-mk3-driver.git; cd maschine-mikro-mk3-driver
-$ sudo cp 98-maschine.rules /etc/udev/rules.d/
-$ sudo udevadm control --reload && sudo udevadm trigger
-$ cargo run --release
+---
+
+## Key Features
+
+- **File-Based Configuration**  
+  All settings are loaded from a `maschine_config.json` file — easy to edit without recompiling.
+
+- **Pad Velocity Sensitivity**  
+  Adjust the sensitivity of the pads using the `velocity_sensitivity` parameter in the config.
+
+- **Pad MIDI Mapping (Note Maps)**  
+  Customize the MIDI note for each of the 16 pads individually.
+
+- **Pad Color & Backlight Settings**
+  - `pad_colors`: Set the color of each pad using a wide range of hues.
+  - `backlight` settings:
+    - `note_off`: `"off"`, `"dim"`, `"normal"`, or `"bright"`
+    - `note_on`: `"off"`, `"dim"`, `"normal"`, or `"bright"`
+
+This project transforms the Mikro MK3 into a **flexible, personalizable MIDI controller**.
+
+---
+
+##  Installation & Setup
+
+### 1. Install Dependencies
+
+```bash
+sudo apt install cargo pkg-config build-essential libusb-1.0-0-dev libudev-dev
 ```
 
-If your user is in `input` group, this will init the controller and create an alsaseq MIDI port called `Maschine Mikro Mk3 MIDI`.
-Pads have been tested to work with Hydrogen, EZdrummer 2/3, Addictive Drums 2 as plugins via REAPER+LinVst and standalone via Wine.
+### 2. Clone and Build
+```bash
+git clone https://github.com/r00tman/maschine-mikro-mk3-driver.git
+cd maschine-mikro-mk3-driver
+sudo cp 98-maschine.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+cargo build --release
+```
 
-## Progress
+### 3. Set Up User Permissions
+Ensure your user is part of the `input` group:
+```bash
+sudo usermod -a -G input $USER
+```
+You may need to log out and log back in for changes to take effect.
+If your user is in the input group, the controller should initialize and create an ALSA MIDI port named:**Maschine Mikro Mk3 MIDI**
 
-What works:
- - Pads,
- - Buttons,
- - Encoder,
- - Slider,
- - LEDs,
- - Screen.
+### 4. (Optional) Create a Convenient Alias
+To run the driver from anywhere using a simple command:
+```bash
+echo "alias maschine='/home/studio/maschine-mikro-mk3-driver/target/release/maschine-mikro-mk3-driver'" >> ~/.bashrc
+source ~/.bashrc
+```
+Now you can just type **maschine** in your terminal to launch the driver.
 
-So, basically everything, and even more than with the official driver.
-For example, it is now possible to turn unpressed pad LEDs completely off in the layout.
-Or it turns out that every button has 4 levels of brightness, not just Off/On as in the official MIDI Mode.
 
-Although at the moment, only pads are exported via MIDI.
-Pad MIDI notes are hardcoded and can be changed in `src/main.rs:L201`.
+## Next Steps / Planned Features
 
-A better solution would be to make a config file and a GUI configurator which would allow to map all functions freely.
-Once this dynamic mapping is implemented, it would be much easier to export buttons and other functions via MIDI, OSC, etc.
+    ✅ MIDI Assignment for Buttons & Encoders
+    Assign custom MIDI messages to physical controls via the config file.
+
+    ✅ Button Backlight Control
+    Fully customizable button backlighting and behavior.
+
+    🚧 GUI Settings Generator
+    Build a simple GUI to manage and preview maschine_config.json settings.
+
+## Credits
+    Original work by r00tman
+    Forked and extended for advanced configuration and usability
 
 Contributions are welcome!
 
